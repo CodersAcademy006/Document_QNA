@@ -1,7 +1,8 @@
-# import essential libraries
-import streamlit as st
+# app.py
+
 import os
 from dotenv import load_dotenv
+import streamlit as st
 from langchain_groq import ChatGroq
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -12,100 +13,119 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 import tempfile
 
-st.set_page_config(page_title='Document QA ChatBot',
-                   page_icon =':robot_face:',
-                   layout='centered',
-                   initial_sidebar_state='auto')
+# ─── Streamlit Config ─────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title='Document QA ChatBot',
+    page_icon=':robot_face:',
+    layout='centered',
+    initial_sidebar_state='auto'
+)
 
-# load the environment variables
-load_dotenv()
-groq_api_key=os.getenv('GROQ_API_KEY')
-huggingface_api_key = os.getenv('HUGGINGFACEHUB_API_TOKEN')
+# ─── Load & Inject Secrets ─────────────────────────────────────────────────────
+load_dotenv()  # reads .env
 
-# load the llm model, in this case, we use llama3 model
-llm = ChatGroq(groq_api_key=groq_api_key, model_name='Llama3-8b-8192')
+# Pull from OS, error out if missing
+groq_key = os.getenv("GROQ_API_KEY")
+if not groq_key:
+    st.error("❌ Please set GROQ_API_KEY in your .env and restart.")
+    st.stop()
+# Inject for Groq client to pick up
+os.environ["GROQ_API_KEY"] = groq_key
 
-# create a prompt template
-prompt = ChatPromptTemplate.from_template(
-"""
+hf_key = os.getenv("HUGGINGFACE_API_KEY")
+if not hf_key:
+    st.error("❌ Please set HUGGINGFACE_API_KEY in your .env and restart.")
+    st.stop()
+
+# ─── Initialize LLM ────────────────────────────────────────────────────────────
+# Note: we do *NOT* pass groq_api_key here!
+llm = ChatGroq(model_name="Llama3-8b-8192")
+
+# ─── Prompt Template ───────────────────────────────────────────────────────────
+prompt = ChatPromptTemplate.from_template("""
 Answer the questions based on the provided text only.
 Please provide the most accurate responses based on the question.
-If answer cannot find from the context, please reply to the users that the information is not found in the provided documents.
+If the answer cannot be found in the context, say: 'The information is not found in the provided documents.'
 
 <context>
 {context}
-<context>
-Questions:{input}
+</context>
+
+Question: {input}
+""")
+
+# ─── Sidebar Description ───────────────────────────────────────────────────────
+description = """
+A chatbot designed to answer questions directly from your uploaded documents.  
+It processes and analyzes your PDFs to provide accurate, context-specific answers.
 """
-)
 
-description = '''
-A chatbot designed to answer questions directly from your uploaded documents. 
-Utilizing state-of-the-art language models and embeddings, the Document QA ChatBot processes and analyzes your PDFs to provide accurate and context-specific answers. 
-Whether you need to extract information from research papers, reports, or any other documents, Document QA ChatBot is here to help with seamless, interactive Q&A capabilities.
-'''
-
-# function to clear the session state
+# ─── Helpers ───────────────────────────────────────────────────────────────────
 def clear_session_state():
-    for key in st.session_state.keys():
+    for key in list(st.session_state.keys()):
         del st.session_state[key]
 
-# function to load data, split data into chunks, perform embeddings and store in vector database
-def vector_embeddings(file):
-    if 'vectors' not in st.session_state:
-        st.session_state.embeddings=HuggingFaceEmbeddings(model_name='BAAI/bge-small-en-v1.5', model_kwargs={'device':'cpu'}, encode_kwargs={'normalize_embeddings':False})
-        st.session_state.text_splitter=RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=200)
+def vector_embeddings(pdf_file):
+    if "vectors" not in st.session_state:
+        st.session_state.embeddings = HuggingFaceEmbeddings(
+            model_name="BAAI/bge-small-en-v1.5",
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": False}
+        )
+        st.session_state.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=5000, chunk_overlap=200
+        )
         st.session_state.docs = []
         st.session_state.final_documents = []
 
     try:
-        # Create a temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
-            temp_file.write(file.read())
-            temp_file_path = temp_file.name
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(pdf_file.read())
+            path = tmp.name
 
-        loader = PyPDFLoader(temp_file_path)
+        loader = PyPDFLoader(path)
         docs = loader.load()
-        final_documents = st.session_state.text_splitter.split_documents(docs)
+        chunks = st.session_state.text_splitter.split_documents(docs)
 
-        # Append the new documents to the existing ones
         st.session_state.docs.extend(docs)
-        st.session_state.final_documents.extend(final_documents)
-
-        # Update the vector store with the new documents
-        st.session_state.vectors = FAISS.from_documents(st.session_state.final_documents, st.session_state.embeddings)
-    
+        st.session_state.final_documents.extend(chunks)
+        st.session_state.vectors = FAISS.from_documents(
+            st.session_state.final_documents,
+            st.session_state.embeddings
+        )
     except Exception as e:
-        st.error(f"An unexpected error occurred: {e}")
+        st.error(f"Error processing PDF: {e}")
 
-st.title('Document QA ChatBot')
+# ─── UI ───────────────────────────────────────────────────────────────────────
+st.title("📄 Document QA ChatBot")
 
-st.sidebar.title('Documents Uploader')
+st.sidebar.title("📎 Upload your PDF")
 st.sidebar.write(description)
-file = st.sidebar.file_uploader('Upload your document', accept_multiple_files=False, type=['pdf'])
-if file:
-    vector_embeddings(file)
 
+uploaded = st.sidebar.file_uploader("Choose a PDF file", type=["pdf"])
+if uploaded:
+    vector_embeddings(uploaded)
 
-
-# Streamli UI --- clear session state (vector DB)
-if st.sidebar.button('Refresh'):
+if st.sidebar.button("🔄 Refresh"):
     clear_session_state()
 
-# Streamlit UI --- user and bot conversation boxes
-user = st.chat_message('User')
-bot = st.chat_message('Assistant')
-
-# Streamlit UI --- for user to input their queries
-prompt1 = st.chat_input('Please enter your question:')
-
-# initiate the QA retrieval and provide answer to user
-try:
-    user.write(f'User: {prompt1}')
-    document_chain=create_stuff_documents_chain(llm, prompt)
-    retriever=st.session_state.vectors.as_retriever()
-    retrieval_chain=create_retrieval_chain(retriever, document_chain)
-    response=retrieval_chain.invoke({'input':prompt1})
-    bot.write(f'Bot: {response["answer"]}')
-except:
-    bot.write('Bot: I will only answer question based on the document uploaded...')
+# Chat interface
+user_msg = st.chat_input("Ask a question about your document:")
+if user_msg:
+    st.chat_message("user").write(user_msg)
+    try:
+        doc_chain = create_stuff_documents_chain(llm, prompt)
+        retriever = st.session_state.vectors.as_retriever()
+        qa_chain = create_retrieval_chain(retriever, doc_chain)
+        ans = qa_chain.invoke({"input": user_msg})["answer"]
+        st.chat_message("assistant").write(ans)
+    except Exception as e:
+        st.chat_message("assistant").write(
+            "I can't answer that right now. Make sure you've uploaded a PDF. " 
+            f"(Error: {e})"
+        )
+        st.error(f"Error: {e}")
+    finally:
+        st.session_state["last_question"] = user_msg
+        st.session_state["last_answer"] = ans
+        st.session_state["last_docs"] = st.session_state.docs
